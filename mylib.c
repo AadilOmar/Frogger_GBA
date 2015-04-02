@@ -161,3 +161,4 @@ void drawTruck(Truck *tptr)
 	tptr->oldrow = tptr->row;
 	tptr->oldcol = tptr->col;
 }
+

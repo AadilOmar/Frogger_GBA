@@ -1,5 +1,7 @@
 //TODO
-//when logs/lilys go offscreen, their col doesnt reset to 0. Must fix in orderto do collision check
+//fix slots. Always changing the first one instead of current slot
+//add timing and dma
+
 
 // #include "mylib.c"
 #include <stdio.h>
@@ -10,7 +12,10 @@
 #include "car.c"
 #include "truck.c"
 
+
 typedef unsigned short u16;
+typedef unsigned int u32;
+
 #define MAX_WIDTH 240
 #define MAX_HEIGHT 160
 
@@ -47,6 +52,39 @@ typedef unsigned short u16;
 #define KEY_DOWN_NOW(key)  (~(BUTTONS) & key)
 #define BUTTONS *(volatile unsigned int *)0x4000130
 
+typedef struct
+{								// ***********************************************************
+	 const volatile void *src;	// We mark this as const which means we can assign it const
+	 volatile void *dst;		// things without the compiler yelling but we can also pass it
+	 volatile u32 cnt;		// things that are not const!
+								// ***********************************************************
+} DMAREC;
+#define DMA ((volatile DMAREC *)0x040000B0)
+
+#define DMA_DESTINATION_INCREMENT (0 << 21)
+#define DMA_DESTINATION_DECREMENT (1 << 21)
+#define DMA_DESTINATION_FIXED (2 << 21)
+#define DMA_DESTINATION_RESET (3 << 21)
+
+#define DMA_SOURCE_INCREMENT (0 << 23)
+#define DMA_SOURCE_DECREMENT (1 << 23)
+#define DMA_SOURCE_FIXED (2 << 23)
+
+#define DMA_REPEAT (1 << 25)
+
+#define DMA_16 (0 << 26)
+#define DMA_32 (1 << 26)
+
+#define DMA_NOW (0 << 28)
+#define DMA_AT_VBLANK (1 << 28)
+#define DMA_AT_HBLANK (2 << 28)
+#define DMA_AT_REFRESH (3 << 28)
+
+#define DMA_IRQ (1 << 30)
+#define DMA_ON (1 << 31)
+
+#define START_ON_FIFO_EMPTY 0x30000000
+
 char gameMode = 0;
 
 const short frogWidth = 8;
@@ -73,6 +111,7 @@ void drawChar(int row, int col, char ch, u16 color);
 void drawString(int row, int col, char *s, u16 color);
 void drawStartGameString();
 void drawFrog();
+void drawFrogBetter();
 void drawNewFrog();
 void drawLog();
 void drawLily();
@@ -86,8 +125,11 @@ int onRaft();
 void reset();
 void drawSafeAreas();
 void drawHoles();
+void drawBlackHoles();
 int outOfBounds();
 void printLives(int lives);
+void drawImage3(int r, int c, int width, int height, const u16* image);
+
 
 typedef struct{
 	int width;
@@ -149,8 +191,9 @@ int main()
 	frog1.height = frogHeight;
 	frog1.width = frogWidth;
 	frog1.col = 125;
-	frog1.row = 150;
+	frog1.row = 152;
 	Frog *frogPntr = &frog1;
+
 
 	EndSlot slotArray[4];
 	int offset = 32;
@@ -228,8 +271,15 @@ int main()
 
 	REG_DISPCTL = MODE3 | BG2_ENABLE;
 
+	drawBlackHoles();
+	printLives(lives);
+
 	while(1) // Game Loop
 	{
+		if(frog1.row >=142 || (frog1.row>=72&&frog1.row<90) || (frog1.row>=10&&frog1.row<20)){	
+			drawHoles(&slotArray);
+			drawSafeAreas();
+		}
 		if(KEY_DOWN_NOW(BUTTON_SELECT)){
 			gameMode = 0;
 			break;
@@ -240,31 +290,29 @@ int main()
 		else if (gameMode==2){
 			drawStartGameString();
 			// drawEndGameThing();
-			// drawString(20, 20, "mah niga", BLUE);
 		}
 		else{ //gameMode = 1
 			if(KEY_DOWN_NOW(BUTTON_UP))
 			{
-				frog1.row--;
+				frog1.row-=2;
 			}
 			if(KEY_DOWN_NOW(BUTTON_DOWN))
 			{
-				frog1.row++;
+				frog1.row+=2;
 			}
 			if(KEY_DOWN_NOW(BUTTON_LEFT))
 			{
-				frog1.col--;
+				frog1.col-=2;
 			}
 			if(KEY_DOWN_NOW(BUTTON_RIGHT))
 			{
-				frog1.col++;
+				frog1.col+=2;
 			}	
-			// drawRect(20,0,60,240,BLUE); //makes everything flash
 
 			//makes logs go forwards and lilys go backwards
 			for(int x=0;x<4;x++){
 				logArray[x].col++;
-				logArray2[x].col++;				
+				logArray2[x].col+=2;				
 				drawLog(&logArray[x]);
 				drawLog(&logArray2[x]);		
 				lilyArray[x].col--;
@@ -275,101 +323,114 @@ int main()
 			for(int x=0;x<4;x++){
 				carArray[x].col--;
 				drawCar(&carArray[x]);
-				carArray2[x].col--;
+				carArray2[x].col-=2;
 				drawCar(&carArray2[x]);				
-				if(carArray[x].col == 0){
-					carArray[x].col = 240;
-				}
-				if(carArray2[x].col == 0){
-					carArray2[x].col = 240;
-				}
 				truckArray[x].col++;
 				drawTruck(&truckArray[x]);
 				truckArray2[x].col++;
 				drawTruck(&truckArray2[x]);				
-				if(truckArray[x].col == 240){
-					truckArray[x].col = 0;
-				}
-				if(truckArray2[x].col == 240){
-					truckArray2[x].col = 0;
-				}
 			}
-			// if((!onRaft(frogPntr, &lilyArray, &logArray)&&((frog1.row+4)<80))&&(!onRaft(frogPntr, &lilyArray2, &logArray2)&&((frog1.row+4)<80))){
-			// 	lives--;
-			// 	frog1.col = 125;
-			// 	frog1.row = 150;
-			// 	// reset();
-			// 	drawRect(0,0,20,20,GREEN);
-			// }
 
+			// if(frog1.row<79 && frog1.row>20){
+			// 	if((!onRaft(frogPntr, &lilyArray, &logArray)&&((frog1.row+4)<80))&&(!onRaft(frogPntr, &lilyArray2, &logArray2)&&((frog1.row+4)<80))){
+			// 		lives--;
+			// 		frog1.col = 125;
+			// 		frog1.row = 150;
+			// 		// reset();
+			// 		drawRect(0,0,20,20,GREEN);
+			// 	}
+			// }
 			if(outOfBounds(frogPntr,&slotArray) && frog1.row>=20){
 				lives--;
-				drawRect(0,0,10,100,BLACK);
+				printLives(lives);
 				frog1.col = 125;
-				frog1.row = 150;
+				frog1.row = 152;
 			}
 			//not out of bounds or row<20
 			else if (frog1.row<20){
-				if(checkEndSlotCollision(frogPntr,&slotArray)==1){
-					drawRect(0,0,10,10,YELLOW);
+				int status = checkEndSlotCollision(frogPntr,&slotArray); 
+				if(status==1){
+					// drawRect(50,50,10,10,YELLOW);
 				}
-				else if (checkEndSlotCollision(frogPntr,&slotArray)==0){
-					drawRect(0,0,10,10,RED);	
-					drawRect(0,0,10,100,BLACK);
+				else if(status==0){
+					//loses life
+					drawRect(50,50,10,10,RED);	
 					lives--;
 					frog1.col = 125;
-					frog1.row = 150;					
+					frog1.row = 152;
+					printLives(lives);
 				}
 				else{
+					// drawHoles();
+					//success
 					frog1.col = 125;
-					frog1.row = 150;						
-					drawRect(0,0,10,10,MAGENTA);										
+					frog1.row = 152;						
+					drawRect(50,50,10,10,MAGENTA);										
 				}
 			}
-
-			drawHoles(&slotArray);
-			drawSafeAreas();						
+						
 			WaitForVblank();
-			drawFrog(frogPntr);
-			boundsCheck(&lilyArray,&logArray);		
-			boundsCheck(&lilyArray2,&logArray2);		
-			printLives(lives);
-			//make two if statements here so the mehtod code doesnt get too crazy. Done	
-			// if(checkCollision(frogPntr,&carArray) || checkCollision(frogPntr,&carArray2)){
-			// 	frog1.col = 125;
-			// 	frog1.row = 150;
-			// 	lives--;
-			// drawRect(0,0,10,100,BLACK);
+			boundsCheck(&lilyArray,&logArray, &carArray, &truckArray);		
+			boundsCheck(&lilyArray2,&logArray2, &carArray2, &truckArray2);			
+			// make two if statements here so the mehtod code doesnt get too crazy. Done	
+			// if(frog1.row>80){
+			// 	if(checkCollision(frogPntr,&carArray,&truckArray) || checkCollision(frogPntr,&carArray2,&truckArray2)){
+			// 		drawRect(0,0,10,10,MAGENTA);
+			// 		frog1.col = 125;
+			// 		frog1.row = 152;
+			// 		lives--;
+			// 		printLives(lives);
+			// 		drawRect(0,0,10,100,BLACK);
 
+			// 	}
 			// }
-			// 	if(lives==0){
-			// 		gameMode = 2;
-			// 	}	
-			if(onLilyPad(frogPntr, &lilyArray)||onLilyPad(frogPntr, &lilyArray2)){
+				if(lives==0){
+					gameMode = 2;
+				}	
+			if(onLilyPad(frogPntr, &lilyArray)||(onLilyPad(frogPntr, &lilyArray2))){
 				frog1.col--;
-			}
-			if(onLog(frogPntr, &logArray)||onLog(frogPntr, &logArray2)){
+				drawRect(230,150,10,10,YELLOW);
+			}				
+			else if(onLog(frogPntr, &logArray)){
+				drawRect(230,150,10,10,RED);				
 				frog1.col++;
 			}
+			else if(onLog(frogPntr, &logArray2)){
+				drawRect(230,150,10,10,BLUE);								
+				frog1.col+=2;
+			}
 
-		}	
+		drawFrogBetter(frogPntr);
+		}
+	}
+}
+
+
+void drawImage3(int c, int r, int width, int height, const u16* image)
+{	
+	for (int i = 0; i < height; i++) {
+		DMA[3].src = &image[OFFSET(i, 0, width)];
+		DMA[3].dst = videoBuffer + OFFSET(r + i, c, 240);
+		DMA[3].cnt = width | DMA_ON;
 	}
 }
 
 void printLives(int lives){
+	drawRect(0,0,10,240,BLACK);
 	if(lives == 3){
-		drawString(0,0,"Lives: 3",RED);
+		drawString(0,180,"Lives: 3",RED);
 	}
 	else if(lives == 2){
-		drawString(0,0,"Lives: 2",RED);
+		drawString(0,180,"Lives: 2",RED);
 	}
 	else if (lives == 1){
-		drawString(0,0,"Lives: 1",RED);
+		drawString(0,180,"Lives: 1",RED);
 	}
 	else{
-		drawString(0,0,"Lives: 0",RED);
+		drawString(0,180,"Lives: 0",RED);
 	}
 }
+
 void setPixel(int row, int col, u16 color)
 {
 	videoBuffer[OFFSET(row, col, 240)] = color;
@@ -387,16 +448,17 @@ void drawRect(int row, int col, int height, int width, unsigned short color)
 }
 
 int onLog(Frog *fpntr, Log *logPntr){
-	int frogX = fpntr->col;	
-	int frogY = fpntr->row;	
-	int frogW = fpntr->width;	
-	int frogH = fpntr->height;		
-	int logX = (*logPntr).col;	
-	int logY = (*logPntr).row;	
-	int logW = (*logPntr).width;	
-	int logH = (*logPntr).height;
 
 	for (int x=0;x<4;x++){
+		int frogX = fpntr->col;	
+		int frogY = fpntr->row;	
+		int frogW = fpntr->width;	
+		int frogH = fpntr->height;		
+		int logX = (*logPntr).col;	
+		int logY = (*logPntr).row;	
+		int logW = (*logPntr).width;	
+		int logH = (*logPntr).height;
+
 		if ((frogX < (logX + logW)) && ((frogX + frogW) > logX) && (frogY < (logY + logH)) && ((frogH + frogY) > logY)) {
 			return 1;
 		}
@@ -406,15 +468,16 @@ int onLog(Frog *fpntr, Log *logPntr){
 }
 
 int onLilyPad(Frog *fpntr, Lily *lpntr){
-	int frogX = fpntr->col;	
-	int frogY = fpntr->row;	
-	int frogW = fpntr->width;	
-	int frogH = fpntr->height;	
-	int lilyX = (*lpntr).col;	
-	int lilyY = (*lpntr).row;	
-	int lilyW = (*lpntr).width;	
-	int lilyH = (*lpntr).height;
-	for (int x=0;x<4;x++){			
+
+	for (int x=0;x<4;x++){	
+		int frogX = fpntr->col;	
+		int frogY = fpntr->row;	
+		int frogW = fpntr->width;	
+		int frogH = fpntr->height;	
+		int lilyX = (*lpntr).col;	
+		int lilyY = (*lpntr).row;	
+		int lilyW = (*lpntr).width;	
+		int lilyH = (*lpntr).height;		
 		if ((frogX < (lilyX + lilyW)) && ((frogX + frogW) > lilyX) && (frogY < (lilyY + lilyH)) && ((frogH + frogY) > lilyY)) {
 			return 1;
 		}
@@ -424,20 +487,21 @@ int onLilyPad(Frog *fpntr, Lily *lpntr){
 }
 
 int onRaft(Frog *fpntr, Lily *lpntr, Log *lgpntr){
-	int frogX = fpntr->col+2;	
-	int frogY = fpntr->row+2;	
-	int frogW = fpntr->width-4;	
-	int frogH = fpntr->height-4;	
-	int lilyX = (*lpntr).col;	
-	int lilyY = (*lpntr).row;	
-	int lilyW = (*lpntr).width;	
-	int lilyH = (*lpntr).height;
-	int logX = (*lgpntr).col;	
-	int logY = (*lgpntr).row;	
-	int logW = (*lgpntr).width;	
-	int logH = (*lgpntr).height;
-
+	
 	for (int x=0;x<4;x++){
+		int frogX = fpntr->col+3;	
+		int frogY = fpntr->row+3;	
+		int frogW = fpntr->width-6;	
+		int frogH = fpntr->height-6;	
+		int lilyX = (*lpntr).col;	
+		int lilyY = (*lpntr).row;	
+		int lilyW = (*lpntr).width;	
+		int lilyH = (*lpntr).height;
+		int logX = (*lgpntr).col;	
+		int logY = (*lgpntr).row;	
+		int logW = (*lgpntr).width;	
+		int logH = (*lgpntr).height;
+
 		if (((frogX < (lilyX + lilyW)) && ((frogX + frogW) > lilyX) && (frogY < (lilyY + lilyH)) && ((frogH + frogY) > lilyY))) {
 			return 1;
 		}
@@ -451,7 +515,7 @@ int onRaft(Frog *fpntr, Lily *lpntr, Log *lgpntr){
 }
 
 
-
+ 
 int outOfBounds(Frog *fpntr, EndSlot *spntr){
 
 	if(fpntr->col >= MAX_WIDTH-4 || (fpntr->col+fpntr->width) <= 4 || fpntr->row >= (MAX_HEIGHT-4)){
@@ -462,54 +526,50 @@ int outOfBounds(Frog *fpntr, EndSlot *spntr){
 
 int checkEndSlotCollision(Frog *fpntr, EndSlot *spntr){
 
-	// int slotH = spntr->height;	
-	for (int x=0;x<4;x++){
-		int frogX = fpntr->col;	
-		int frogY = fpntr->row;	
-		int frogW = fpntr->width;	
-		// int frogH = fpntr->height;
-		int slotX = spntr->col;	
-		int slotY = spntr->row;	
-		int slotW = spntr->width;
-		int slotH = spntr->height;	
-		// spntr->occupied = 1;
+	// int slotH = spntr->height;
+	int frogX = fpntr->col;	
+	int frogY = fpntr->row;	
+	int frogW = fpntr->width;
 
-		if(frogY == slotY+1){
-			//success
-			(*spntr).occupied = 1;
-			spntr->occupied = 1;
+	for (int x=0;x<4;x++){
+	
+		int slotX = (spntr+x)->col;	
+		int slotY = (spntr+x)->row;	
+		int slotW = (spntr+x)->width;
+		int slotH = (spntr+x)->height;	
+
+		if(frogY <= slotY+2 && frogX >= slotX && ((frogX+frogW) <= (slotX+slotW)) && (frogY-5)<(slotY+slotH)){
+			//success- completely in slot
+			(spntr+x)->occupied = 1;
 			return 2;
 		}
 		if(frogX >= slotX && ((frogX+frogW) <= (slotX+slotW)) && (frogY-5)<(slotY+slotH)){
-			//is in slot
+			//is sort of in slot
 			return 1;
 		}
-	spntr++;
 	}
 	return 0;
 }
 
 int checkCollision(Frog *fpntr, Car *cpntr, Truck *tpntr){
-	int frogX = fpntr->col;	
-	int frogY = fpntr->row;	
-	int frogW = fpntr->width;	
-	int frogH = fpntr->height;	
-	int carX = (*cpntr).col;	
-	int carY = (*cpntr).row;	
-	int carW = (*cpntr).width;	
-	int carH = (*cpntr).height;
-	int truckX = (*tpntr).col;	
-	int truckY = (*tpntr).row;	
-	int truckW = (*tpntr).width;	
-	int truckH = (*tpntr).height;	
+
 	for (int x=0;x<4;x++){
-		
+		int frogX = fpntr->col;	
+		int frogY = fpntr->row;	
+		int frogW = fpntr->width;	
+		int frogH = fpntr->height;	
+		int carX = (*cpntr).col;	
+		int carY = (*cpntr).row;	
+		int carW = (*cpntr).width;	
+		int carH = (*cpntr).height;
+		int truckX = (*tpntr).col;	
+		int truckY = (*tpntr).row;	
+		int truckW = (*tpntr).width;	
+		int truckH = (*tpntr).height;	
 		if ((frogX < (carX + carW)) && ((frogX + frogW) > carX) && (frogY < (carY + carH)) && ((frogH + frogY) > carY)) {
-			// gameMode = 2;
 			return 1;
 		}
 		if ((frogX < (truckX + truckW)) && ((frogX + frogW) > truckX) && (frogY < (truckY + truckH)) && ((frogH + frogY) > truckY)) {
-			// gameMode = 2;
 			return 1;
 		}
 		cpntr++;
@@ -518,7 +578,7 @@ int checkCollision(Frog *fpntr, Car *cpntr, Truck *tpntr){
 	return 0;
 }
 
-void boundsCheck(Lily *lilyPntr, Log *logPntr)
+void boundsCheck(Lily *lilyPntr, Log *logPntr, Car *cpntr, Truck *tptr)
 {
 	for (int x=0;x<4;x++){
 		if((*logPntr).col > MAX_WIDTH){
@@ -533,21 +593,73 @@ void boundsCheck(Lily *lilyPntr, Log *logPntr)
 		if((*lilyPntr).col < 0){
 			(*lilyPntr).col = MAX_WIDTH;
 		}
+
+		if((*tptr).col > MAX_WIDTH){
+			(*tptr).col = 0;
+		}	
+		if((*cpntr).col > MAX_WIDTH){
+			(*cpntr).col = 0;
+		}	
+		if((*tptr).col < 0){
+			(*tptr).col = MAX_WIDTH;
+		}	
+		if((*cpntr).col < 0){
+			(*cpntr).col = MAX_WIDTH;
+		}
 		lilyPntr++;				
-		logPntr++;		
+		logPntr++;	
+		tptr++;
+		cpntr++;	
 	}
 }
 
 void drawHoles(EndSlot *slotPntr){
+	
 	for (int x=0;x<4;x++){
-		if(slotPntr->occupied==0){
-			drawRect(10,slotPntr->col,10,20,GREY);
+		if((slotPntr+x)->occupied==0){
+			drawRect(10,(slotPntr+x)->col,10,20,GREY);
 		}
 		else{
-			drawRect(10,slotPntr->col,10,20,BLUE);			
+			drawRect(150,30,10,10,GREEN);
+			drawRect(10,(slotPntr+x)->col,10,20,BLACK);			
 		}
-		slotPntr++;
+		// slotPntr++;
 	}
+
+	// EndSlot *s1 = slotPntr;
+	// EndSlot *s2 = slotPntr+1;
+	// EndSlot *s3 = slotPntr+2;
+	// EndSlot *s4 = slotPntr+3;
+
+	// if(s1->occupied==1){
+	// 	drawRect(150,0,10,10,GREEN);
+	// }
+	// else{
+	// 	drawRect(10,s1->col,10,20,GREY);		
+	// }
+	// if(s2->occupied==1){
+	// 	drawRect(150,40,10,10,GREEN);		
+	// }
+	// else{
+	// 	drawRect(10,s2->col,10,20,GREY);		
+	// }	
+	// if(s3->occupied==1){
+	// 	drawRect(150,80,10,10,GREEN);
+	// }
+	// else{
+	// 	drawRect(10,s3->col,10,20,GREY);		
+	// }	
+	// if(s4->occupied==1){
+	// 	drawRect(150,160,10,10,GREEN);		
+	// }
+	// else{
+	// 	drawRect(10,s4->col,10,20,GREY);		
+	// }	
+	// s1->occupied = 0;
+
+
+}
+void drawBlackHoles(){
 	drawRect(10,0,10,32,BLACK);
 	drawRect(10,52,10,32,BLACK);
 	drawRect(10,104,10,32,BLACK);
@@ -602,56 +714,35 @@ void drawString(int row, int col, char *s, u16 color)
 }
 
 void drawSafeAreas(){
-	drawRect(150,0,10,240,GREY);
-	drawRect(80,0,10,240,GREY);
+	drawRect(150,0,1,240,GREY);
+	drawRect(80,0,1,240,GREY);
+	drawRect(90,0,1,240,GREY);
+	drawRect(10,0,1,240,GREY);	
+
 }
 
 void drawFrog(Frog *fptr)
 {
 	drawRect(fptr->oldrow,fptr->oldcol,fptr->height,fptr->width, BLACK);				
-	int index = 0;
-	int r,c;
-	for(r=0; r<frogHeight; r++)
-	{
-		for(c=0; c<frogWidth; c++)
-		{
-			setPixel(r+fptr->row, c+fptr->col, frog[index]);
-			index+=1;
-		}
-	}
-	fptr->oldrow = fptr->row;
-	fptr->oldcol = fptr->col;
-}
-void drawNewFrog(Frog *fptr)
-{
-	drawRect(fptr->oldrow,fptr->oldcol,fptr->height,fptr->width, BLACK);				
-	int index = 0;
-	int r,c;
-	for(r=0; r<frogHeight; r++)
-	{
-		for(c=0; c<frogWidth; c++)
-		{
-			setPixel(r+fptr->row, c+fptr->col, frog[index]);
-			index+=1;
-		}
-	}
+	drawImage3(fptr->col,fptr->row,fptr->width,fptr->height, frog);	
 	fptr->oldrow = fptr->row;
 	fptr->oldcol = fptr->col;
 }
 
+void drawFrogBetter(Frog *fptr)
+{
+	drawRect(fptr->oldrow,fptr->oldcol,fptr->height,fptr->width, BLACK);				
+	// drawImage3(fptr->col,fptr->row,fptr->width,fptr->height, frog);	
+	drawRect(fptr->row,fptr->col,fptr->height,fptr->width, GREEN);				
+	fptr->oldrow = fptr->row;
+	fptr->oldcol = fptr->col;
+}
+
+
 void drawLog(Log *lptr)
 {
 	drawRect(lptr->oldrow,lptr->oldcol,lptr->height,lptr->width, BLACK);				
-	int index = 0;
-	int r,c;
-	for(r=0; r<logHeight; r++)
-	{
-		for(c=0; c<logWidth; c++)
-		{
-			setPixel(r+lptr->row, c+lptr->col, logPic[index]);
-			index+=1;
-		}
-	}
+	drawImage3(lptr->col,lptr->row,lptr->width,lptr->height, logPic);
 	lptr->oldrow = lptr->row;
 	lptr->oldcol = lptr->col;
 }
@@ -659,16 +750,7 @@ void drawLog(Log *lptr)
 void drawLily(Lily *lptr)
 {
 	drawRect(lptr->oldrow,lptr->oldcol,lptr->height,lptr->width, BLACK);				
-	int index = 0;
-	int r,c;
-	for(r=0; r<lilyHeight; r++)
-	{
-		for(c=0; c<lilyWidth; c++)
-		{
-			setPixel(r+lptr->row, c+lptr->col, lily[index]);
-			index+=1;
-		}
-	}
+	drawImage3(lptr->col,lptr->row,lptr->width,lptr->height, lily);	
 	lptr->oldrow = lptr->row;
 	lptr->oldcol = lptr->col;
 }
@@ -676,16 +758,7 @@ void drawLily(Lily *lptr)
 void drawCar(Car *cptr)
 {
 	drawRect(cptr->oldrow,cptr->oldcol,cptr->height,cptr->width, BLACK);				
-	int index = 0;
-	int r,c;
-	for(r=0; r<carHeight; r++)
-	{
-		for(c=0; c<carWidth; c++)
-		{
-			setPixel(r+cptr->row, c+cptr->col, car[index]);
-			index+=1;
-		}
-	}
+	drawImage3(cptr->col,cptr->row,cptr->width,cptr->height, car);
 	cptr->oldrow = cptr->row;
 	cptr->oldcol = cptr->col;
 }
@@ -693,16 +766,7 @@ void drawCar(Car *cptr)
 void drawTruck(Truck *tptr)
 {
 	drawRect(tptr->oldrow,tptr->oldcol,tptr->height,tptr->width, BLACK);				
-	int index = 0;
-	int r,c;
-	for(r=0; r<truckHeight; r++)
-	{
-		for(c=0; c<truckWidth; c++)
-		{
-			setPixel(r+tptr->row, c+tptr->col, truck[index]);
-			index+=1;
-		}
-	}
+	drawImage3(tptr->col,tptr->row,tptr->width,tptr->height, truck);	
 	tptr->oldrow = tptr->row;
 	tptr->oldcol = tptr->col;
 }
